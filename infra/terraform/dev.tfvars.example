@@ -1,0 +1,10 @@
+aws_region        = "us-east-1"
+project           = "tarka"
+environment       = "dev"
+certificate_arn   = "arn:aws:acm:us-east-1:123456789012:certificate/replace-with-approved-certificate-id"
+proxy_domain_name = "tarka.dev.internal.example.com"
+private_hosted_zone_id = "replace-with-private-hosted-zone-id"
+allowed_client_cidrs = []
+upstream_base_url = "https://api.openai.com/v1"
+max_retries       = 2
+fail_policy       = "fail_closed"
