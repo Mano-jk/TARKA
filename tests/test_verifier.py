@@ -1,6 +1,12 @@
 import pytest
 
-from tarka import RuleEvaluationError, RuleSyntaxError, VerificationStatus, verify
+from tarka import (
+    RuleEvaluationError,
+    RuleSyntaxError,
+    VerificationStatus,
+    get_template_rules,
+    verify,
+)
 
 
 def test_discount_above_cap_is_unsat_with_actionable_feedback() -> None:
@@ -71,3 +77,41 @@ def test_user_symbols_cannot_alias_solver_tracking_symbols() -> None:
     )
 
     assert result.status is VerificationStatus.SAT
+
+
+def test_finance_discount_template_verifies_price_and_cap() -> None:
+    rules = get_template_rules("finance.discount")
+    valid = verify(
+        {
+            "applied_discount": 20,
+            "max_discount_percentage": 20,
+            "subtotal": 500,
+            "final_price": 400,
+        },
+        rules,
+    )
+    invalid = verify(
+        {
+            "applied_discount": 30,
+            "max_discount_percentage": 20,
+            "subtotal": 500,
+            "final_price": 350,
+        },
+        rules,
+    )
+
+    assert valid.status is VerificationStatus.SAT
+    assert invalid.status is VerificationStatus.UNSAT
+
+
+def test_supply_chain_template_checks_allocation_bounds() -> None:
+    result = verify(
+        {
+            "allocated_quantity": 11,
+            "requested_quantity": 10,
+            "available_quantity": 20,
+        },
+        get_template_rules("supply_chain.allocation"),
+    )
+
+    assert result.status is VerificationStatus.UNSAT

@@ -24,6 +24,18 @@ The S3 bucket must be bootstrapped separately or provided by the cloud owner. Re
 
 Terraform manages secret versions from sensitive input variables. The values are redacted in normal CLI output but are stored in Terraform state. Protect the state bucket accordingly, do not commit state, `.tfvars`, backend config, or saved plan files, and do not share plans or state exports.
 
+Choose exactly one client authentication mode:
+
+- Single tenant: provide `TF_VAR_proxy_api_key` as a key with at least 32 characters.
+- Multiple tenants: provide `TF_VAR_tenant_api_keys_json` as a JSON object mapping unique tenant IDs to keys with at least 32 characters. The container receives this value as `TARKA_TENANT_API_KEYS`; do not also set the single-tenant key.
+
+For example, set the multi-tenant variable from a secure prompt rather than putting the value in command history:
+
+```powershell
+$secureTenantKeys = Read-Host "Tenant API keys JSON" -AsSecureString
+$env:TF_VAR_tenant_api_keys_json = [System.Net.NetworkCredential]::new("", $secureTenantKeys).Password
+```
+
 ## Build and deploy
 
 Run these commands from `infra/terraform` after configuring AWS CLI credentials and editing `dev.tfvars` and `backend.hcl`:
@@ -31,8 +43,7 @@ Run these commands from `infra/terraform` after configuring AWS CLI credentials 
 ```powershell
 $secureUpstreamKey = Read-Host "Upstream API key" -AsSecureString
 $env:TF_VAR_upstream_api_key = [System.Net.NetworkCredential]::new("", $secureUpstreamKey).Password
-$secureProxyKey = Read-Host "Proxy API key (at least 32 characters)" -AsSecureString
-$env:TF_VAR_proxy_api_key = [System.Net.NetworkCredential]::new("", $secureProxyKey).Password
+# Set exactly one client authentication variable as described above.
 $commit = (git rev-parse --short HEAD).Trim()
 $buildStamp = [DateTime]::UtcNow.ToString("yyyyMMddHHmmssfff")
 $buildSuffix = [guid]::NewGuid().ToString("N").Substring(0, 8)
@@ -58,7 +69,7 @@ The targeted apply bootstraps only the ECR repository so the immutable image can
 
 ```powershell
 terraform destroy -var-file=dev.tfvars -var "image_tag=$imageTag"
-Remove-Item Env:TF_VAR_upstream_api_key,Env:TF_VAR_proxy_api_key
+Remove-Item Env:TF_VAR_upstream_api_key,Env:TF_VAR_proxy_api_key,Env:TF_VAR_tenant_api_keys_json
 ```
 
 Clear these environment variables if you abort before destroy as well. Secrets Manager uses a seven-day recovery window, so destroyed secrets are scheduled for deletion rather than immediately reusable.

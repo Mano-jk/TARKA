@@ -155,6 +155,316 @@ def test_gateway_retries_unsat_plan_and_strips_constraints_upstream() -> None:
     assert "applied_discount=30" in feedback
 
 
+def test_gateway_validates_plan_against_json_schema() -> None:
+    request_bodies: list[dict[str, object]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        request_bodies.append(json.loads(request.content))
+        discount = 30 if len(request_bodies) == 1 else 20
+        return httpx.Response(200, json=_completion(discount))
+
+    async def run() -> dict[str, object]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            gateway = Gateway("https://llm.example/v1", client=client)
+            request = {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Apply the discount."}],
+                "logic_constraints": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {"applied_discount": {"maximum": 20}},
+                        "required": ["applied_discount"],
+                        "additionalProperties": False,
+                    }
+                },
+            }
+            return await gateway.chat_completions(request)
+
+    assert asyncio.run(run()) == _completion(20)
+    assert len(request_bodies) == 2
+    retry_messages = request_bodies[1].get("messages")
+    assert isinstance(retry_messages, list) and retry_messages
+    retry_message = retry_messages[-1]
+    assert isinstance(retry_message, dict)
+    assert "JSON Schema violation" in str(retry_message.get("content"))
+    assert all("logic_constraints" not in body for body in request_bodies)
+
+
+def test_gateway_expands_rule_template_and_rejects_unknown_template() -> None:
+    completion = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps({"applied_discount": 20, "final_price": 400}),
+                }
+            }
+        ]
+    }
+    valid_request = {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Apply the discount."}],
+        "logic_constraints": {
+            "templates": ["finance.discount"],
+            "bindings": {
+                "max_discount_percentage": 20,
+                "subtotal": 500,
+            },
+        },
+    }
+
+    async def verify_valid_template() -> dict[str, object]:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=completion))
+        ) as client:
+            gateway = Gateway("https://llm.example/v1", client=client)
+            return await gateway.chat_completions(valid_request)
+
+    assert asyncio.run(verify_valid_template()) == completion
+
+    async def reject_unknown_template() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=_completion(20)))
+        ) as client:
+            gateway = Gateway("https://llm.example/v1", client=client)
+            await gateway.chat_completions(
+                {
+                    **valid_request,
+                    "logic_constraints": {"templates": ["unknown.policy"]},
+                }
+            )
+
+    with pytest.raises(ValueError, match="Unknown TARKA rule template"):
+        asyncio.run(reject_unknown_template())
+
+
+def test_gateway_rejects_invalid_json_schema_before_upstream_call() -> None:
+    upstream_calls = 0
+
+    def respond(_: httpx.Request) -> httpx.Response:
+        nonlocal upstream_calls
+        upstream_calls += 1
+        return httpx.Response(200, json=_completion(20))
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            gateway = Gateway("https://llm.example/v1", client=client)
+            await gateway.chat_completions(
+                {
+                    "model": "test-model",
+                    "messages": [],
+                    "logic_constraints": {
+                        "schema": {"type": "not-a-json-schema-type"},
+                    },
+                }
+            )
+
+    with pytest.raises(ValueError, match="schema is invalid"):
+        asyncio.run(run())
+    assert upstream_calls == 0
+
+
+def test_gateway_extracts_and_validates_openapi_operation_schema() -> None:
+    request_bodies: list[dict[str, object]] = []
+    document: dict[str, object] = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/discount": {
+                "post": {
+                    "operationId": "applyDiscount",
+                    "requestBody": {"$ref": "#/components/requestBodies/Discount"},
+                }
+            }
+        },
+        "components": {
+            "requestBodies": {
+                "Discount": {
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/Discount"}
+                        }
+                    }
+                }
+            },
+            "schemas": {
+                "Discount": {
+                    "type": "object",
+                    "properties": {"applied_discount": {"type": "integer", "maximum": 20}},
+                    "required": ["applied_discount"],
+                    "additionalProperties": False,
+                }
+            }
+        },
+    }
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        request_bodies.append(json.loads(request.content))
+        discount = 30 if len(request_bodies) == 1 else 20
+        return httpx.Response(200, json=_completion(discount))
+
+    async def run() -> dict[str, object]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            gateway = Gateway("https://llm.example/v1", client=client)
+            return await gateway.chat_completions(
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "Apply the discount."}],
+                    "logic_constraints": {
+                        "openapi": document,
+                        "operation_id": "applyDiscount",
+                    },
+                }
+            )
+
+    assert asyncio.run(run()) == _completion(20)
+    assert len(request_bodies) == 2
+    retry_messages = request_bodies[1].get("messages")
+    assert isinstance(retry_messages, list) and retry_messages
+    retry_message = retry_messages[-1]
+    assert isinstance(retry_message, dict)
+    assert "JSON Schema violation" in str(retry_message.get("content"))
+    assert all("logic_constraints" not in body for body in request_bodies)
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        (
+            {
+                "openapi": "3.1.0",
+                "paths": {
+                    "/discount": {
+                        "post": {
+                            "operationId": "applyDiscount",
+                            "requestBody": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {"$ref": "https://example.test/schema"}
+                                    }
+                                }
+                            },
+                        }
+                    }
+                },
+            },
+            "Only local",
+        ),
+        (
+            {
+                "openapi": "3.0.3",
+                "paths": {},
+            },
+            "Only OpenAPI 3.1",
+        ),
+    ],
+)
+def test_gateway_rejects_unsupported_openapi_schema_before_upstream_call(
+    document: dict[str, object],
+    message: str,
+) -> None:
+    upstream_calls = 0
+
+    def respond(_: httpx.Request) -> httpx.Response:
+        nonlocal upstream_calls
+        upstream_calls += 1
+        return httpx.Response(200, json=_completion(20))
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            gateway = Gateway("https://llm.example/v1", client=client)
+            await gateway.chat_completions(
+                {
+                    "model": "test-model",
+                    "messages": [],
+                    "logic_constraints": {
+                        "openapi": document,
+                        "operation_id": "applyDiscount",
+                    },
+                }
+            )
+
+    with pytest.raises(ValueError, match=message):
+        asyncio.run(run())
+    assert upstream_calls == 0
+
+
+def test_gateway_gates_tool_call_on_prior_successful_workflow_event() -> None:
+    tool_calls = [
+        {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "update_order",
+                                    "arguments": json.dumps({"order_id": "o-1"}),
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "authorize",
+                                    "arguments": json.dumps({"order_id": "o-1"}),
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+    ]
+    upstream_bodies: list[dict[str, object]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        upstream_bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=tool_calls[len(upstream_bodies) - 1])
+
+    async def run() -> dict[str, object]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            gateway = Gateway("https://llm.example/v1", client=client)
+            request = {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Update this order."}],
+                "tools": [
+                    {"type": "function", "function": {"name": "update_order"}},
+                    {"type": "function", "function": {"name": "authorize"}},
+                ],
+                "logic_constraints": {
+                    "workflow": {
+                        "rules": [
+                            {
+                                "type": "requires_prior_success",
+                                "tool": "update_order",
+                                "prior_tool": "authorize",
+                            }
+                        ]
+                    }
+                },
+            }
+            return await gateway.chat_completions(request)
+
+    completion = asyncio.run(run())
+
+    assert completion == tool_calls[1]
+    assert len(upstream_bodies) == 2
+    retry_messages = upstream_bodies[1].get("messages")
+    assert isinstance(retry_messages, list) and retry_messages
+    retry_message = retry_messages[-1]
+    assert isinstance(retry_message, dict)
+    assert "prior successful 'authorize'" in str(retry_message.get("content"))
+    assert all("logic_constraints" not in body for body in upstream_bodies)
+
+
 def test_gateway_fails_closed_after_retry_limit() -> None:
     def respond(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=_completion(30))

@@ -22,6 +22,21 @@ jobs:
       - run: uv run ty check
       - run: uv run pytest
 
+  typescript-sdk:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - run: npm ci
+      - run: npm test
+
   container:
     runs-on: ubuntu-24.04
     steps:

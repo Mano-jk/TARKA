@@ -12,6 +12,7 @@ license = "Apache-2.0"
 dependencies = [
     "fastapi>=0.115",
     "httpx>=0.27",
+    "jsonschema>=4.22",
     "uvicorn>=0.30",
     "z3-solver>=4.13",
 ]

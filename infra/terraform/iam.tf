@@ -38,14 +38,39 @@ resource "aws_secretsmanager_secret_version" "upstream_api_key" {
   secret_string = var.upstream_api_key
 }
 
+resource "terraform_data" "auth_config" {
+  input = "validated"
+
+  lifecycle {
+    precondition {
+      condition     = (var.proxy_api_key == null) != (var.tenant_api_keys_json == null)
+      error_message = "Configure exactly one of proxy_api_key or tenant_api_keys_json."
+    }
+  }
+}
+
 resource "aws_secretsmanager_secret" "proxy_api_key" {
+  count                   = var.proxy_api_key == null ? 0 : 1
   name                    = "${local.name}/proxy-api-key"
   recovery_window_in_days = 7
 }
 
 resource "aws_secretsmanager_secret_version" "proxy_api_key" {
-  secret_id     = aws_secretsmanager_secret.proxy_api_key.id
+  count         = var.proxy_api_key == null ? 0 : 1
+  secret_id     = aws_secretsmanager_secret.proxy_api_key[0].id
   secret_string = var.proxy_api_key
+}
+
+resource "aws_secretsmanager_secret" "tenant_api_keys" {
+  count                   = var.tenant_api_keys_json == null ? 0 : 1
+  name                    = "${local.name}/tenant-api-keys"
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "tenant_api_keys" {
+  count         = var.tenant_api_keys_json == null ? 0 : 1
+  secret_id     = aws_secretsmanager_secret.tenant_api_keys[0].id
+  secret_string = var.tenant_api_keys_json
 }
 
 data "aws_iam_policy_document" "ecs_tasks_assume_role" {
@@ -72,10 +97,11 @@ resource "aws_iam_role_policy_attachment" "execution_managed" {
 data "aws_iam_policy_document" "read_application_secrets" {
   statement {
     actions = ["secretsmanager:GetSecretValue"]
-    resources = [
-      aws_secretsmanager_secret.upstream_api_key.arn,
-      aws_secretsmanager_secret.proxy_api_key.arn,
-    ]
+    resources = flatten([
+      [aws_secretsmanager_secret.upstream_api_key.arn],
+      aws_secretsmanager_secret.proxy_api_key[*].arn,
+      aws_secretsmanager_secret.tenant_api_keys[*].arn,
+    ])
   }
 }
 

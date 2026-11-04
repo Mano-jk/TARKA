@@ -6,8 +6,14 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 import httpx
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+from jsonschema.protocols import Validator
 
+from tarka.contracts import ContractError, operation_request_schema
 from tarka.rules import parse_rule
+from tarka.templates import TemplateError, get_template_rules
+from tarka.temporal import WorkflowRuleError, verify_workflow
 from tarka.verifier import RuleEvaluationError, VerificationResult, VerificationStatus, verify
 
 MAX_UPSTREAM_RESPONSE_BYTES = 4_194_304
@@ -85,6 +91,11 @@ class Gateway:
         self._client = client or httpx.AsyncClient(timeout=timeout)
         self._owns_client = client is None
 
+    @property
+    def fail_policy(self) -> Literal["fail_closed", "fail_open"]:
+        """Return the configured fallback policy for unverifiable completions."""
+        return self._fail_policy
+
     async def aclose(self) -> None:
         """Close the HTTP client when the gateway created it."""
         if self._owns_client:
@@ -125,16 +136,81 @@ class Gateway:
         if type(request_body.get("n", 1)) is not int or request_body.get("n", 1) != 1:
             raise ValueError("Constrained chat requests must request exactly one completion.")
 
-        rules = constraints.get("rules")
-        if (
-            not isinstance(rules, list)
-            or not rules
-            or not all(isinstance(rule, str) for rule in rules)
+        rules = constraints.get("rules", [])
+        if not isinstance(rules, list) or not all(isinstance(rule, str) for rule in rules):
+            raise ValueError("logic_constraints.rules must be a list of strings.")
+        templates = constraints.get("templates", [])
+        if not isinstance(templates, list) or not all(
+            isinstance(template, str) for template in templates
         ):
-            raise ValueError("logic_constraints.rules must be a non-empty list of strings.")
-        rule_list = tuple(rules)
+            raise ValueError("logic_constraints.templates must be a list of names.")
+        if len(templates) > 8:
+            raise ValueError("logic_constraints.templates may contain at most 8 names.")
+        try:
+            template_rules = tuple(
+                rule for template in templates for rule in get_template_rules(template)
+            )
+        except TemplateError as exc:
+            raise ValueError(str(exc)) from exc
+        rule_list = (*rules, *template_rules)
         for rule in rule_list:
             parse_rule(rule)
+        schema = constraints.get("schema")
+        openapi = constraints.get("openapi")
+        operation_id = constraints.get("operation_id")
+        if openapi is not None:
+            if schema is not None:
+                raise ValueError("Specify either logic_constraints.schema or openapi, not both.")
+            if not isinstance(openapi, Mapping):
+                raise ValueError("logic_constraints.openapi must be an OpenAPI document object.")
+            if not isinstance(operation_id, str):
+                raise ValueError("logic_constraints.operation_id must be a string.")
+            try:
+                schema = operation_request_schema(openapi, operation_id)
+            except ContractError as exc:
+                raise ValueError(str(exc)) from exc
+        elif operation_id is not None:
+            raise ValueError("logic_constraints.operation_id requires an OpenAPI document.")
+
+        workflow = constraints.get("workflow")
+        workflow_history: list[Mapping[str, object]] = []
+        workflow_rules: list[Mapping[str, object]] = []
+        if workflow is not None:
+            if not isinstance(workflow, Mapping):
+                raise ValueError("logic_constraints.workflow must be an object.")
+            history = workflow.get("history", [])
+            temporal_rules = workflow.get("rules")
+            if not isinstance(history, list) or not all(
+                isinstance(event, Mapping) for event in history
+            ):
+                raise ValueError("logic_constraints.workflow.history must be a list of objects.")
+            if not isinstance(temporal_rules, list) or not all(
+                isinstance(rule, Mapping) for rule in temporal_rules
+            ):
+                raise ValueError("logic_constraints.workflow.rules must be a list of objects.")
+            workflow_history = history
+            workflow_rules = temporal_rules
+            try:
+                verify_workflow(workflow_history, "tarka_validation_probe", workflow_rules)
+            except WorkflowRuleError as exc:
+                raise ValueError(str(exc)) from exc
+
+        schema_validator: Validator | None = None
+        if schema is not None:
+            if not isinstance(schema, Mapping) and type(schema) is not bool:
+                raise ValueError(
+                    "logic_constraints.schema must be a JSON Schema object or boolean."
+                )
+            try:
+                Draft202012Validator.check_schema(schema)
+            except SchemaError as exc:
+                raise ValueError(f"logic_constraints.schema is invalid: {exc.message}") from exc
+            schema_validator = Draft202012Validator(schema)
+        if not rule_list and schema_validator is None and not workflow_rules:
+            raise ValueError(
+                "logic_constraints must include rules, a schema, OpenAPI, or workflow rules."
+            )
+
         fixed_bindings = constraints.get("bindings", {})
         if not isinstance(fixed_bindings, Mapping) or not all(
             isinstance(name, str) for name in fixed_bindings
@@ -155,7 +231,7 @@ class Gateway:
             last_completion = completion
             last_result = None
             try:
-                plan = self._extract_plan(
+                plan, proposed_tool = self._extract_plan(
                     completion,
                     self._allowed_tool_names(request_body.get("tools")),
                 )
@@ -175,25 +251,89 @@ class Gateway:
                     )
                     last_result = None
                 else:
-                    all_bindings = dict(fixed_bindings)
-                    all_bindings.update(plan)
-                    try:
-                        last_result = verify(all_bindings, rule_list)
-                    except RuleEvaluationError as exc:
-                        feedback = str(exc)
-                    else:
-                        if last_result.status is VerificationStatus.SAT:
-                            return completion
-                        if last_result.status is VerificationStatus.UNKNOWN:
-                            if self._fail_policy == "fail_open":
-                                return completion
-                            raise TimeoutPolicyError(
-                                "The rule solver could not decide: "
-                                f"{last_result.reason or 'unknown reason'}."
-                            )
-                        feedback = last_result.message or (
-                            "The proposed plan violates the declared rules."
+                    schema_errors = (
+                        sorted(
+                            schema_validator.iter_errors(plan),
+                            key=lambda error: (
+                                tuple(str(part) for part in error.absolute_path),
+                                error.message,
+                            ),
                         )
+                        if schema_validator is not None
+                        else []
+                    )
+                    if schema_errors:
+                        error = schema_errors[0]
+                        path = "/" + "/".join(str(part) for part in error.absolute_path)
+                        feedback = f"JSON Schema violation at {path}: {error.message}"
+                        last_result = None
+                    elif workflow_rules:
+                        if proposed_tool is None:
+                            feedback = (
+                                "The response must contain exactly one declared tool call "
+                                "to satisfy workflow constraints."
+                            )
+                            last_result = None
+                        else:
+                            try:
+                                workflow_result = verify_workflow(
+                                    workflow_history,
+                                    proposed_tool,
+                                    workflow_rules,
+                                )
+                            except WorkflowRuleError as exc:
+                                feedback = str(exc)
+                                last_result = None
+                            else:
+                                if not workflow_result.is_valid:
+                                    feedback = " ".join(workflow_result.violations)
+                                    last_result = None
+                                elif not rule_list:
+                                    return completion
+                                else:
+                                    evaluation = self._verify_rules(
+                                        fixed_bindings,
+                                        plan,
+                                        rule_list,
+                                    )
+                                    if isinstance(evaluation, str):
+                                        feedback = evaluation
+                                        last_result = None
+                                    else:
+                                        last_result = evaluation
+                                        if last_result.status is VerificationStatus.SAT:
+                                            return completion
+                                        if last_result.status is VerificationStatus.UNKNOWN:
+                                            if self._fail_policy == "fail_open":
+                                                return completion
+                                            raise TimeoutPolicyError(
+                                                "The rule solver could not decide: "
+                                                f"{last_result.reason or 'unknown reason'}."
+                                            )
+                                        feedback = last_result.message or (
+                                            "The proposed plan violates the declared rules."
+                                        )
+                    elif not rule_list:
+                        return completion
+                    else:
+                        evaluation = self._verify_rules(fixed_bindings, plan, rule_list)
+                        if isinstance(evaluation, str):
+                            feedback = evaluation
+                            last_result = None
+                        else:
+                            last_result = evaluation
+                            if last_result.status is VerificationStatus.SAT:
+                                return completion
+                            if last_result.status is VerificationStatus.UNKNOWN:
+                                if self._fail_policy == "fail_open":
+                                    return completion
+                                raise TimeoutPolicyError(
+                                    "The rule solver could not decide: "
+                                    f"{last_result.reason or 'unknown reason'}."
+                                )
+                            feedback = last_result.message or (
+                                "The proposed plan violates the declared rules."
+                            )
 
             if attempt < self._max_retries:
                 attempt_body["messages"] = [
@@ -214,6 +354,19 @@ class Gateway:
             result=last_result,
             attempts=self._max_retries + 1,
         )
+
+    @staticmethod
+    def _verify_rules(
+        fixed_bindings: Mapping[str, object],
+        plan: Mapping[str, object],
+        rules: tuple[str, ...],
+    ) -> VerificationResult | str:
+        all_bindings = dict(fixed_bindings)
+        all_bindings.update(plan)
+        try:
+            return verify(all_bindings, rules)
+        except RuleEvaluationError as exc:
+            return str(exc)
 
     async def _send(self, request_body: dict[str, object]) -> dict[str, object]:
         response_body = bytearray()
@@ -241,7 +394,7 @@ class Gateway:
         cls,
         completion: Mapping[str, object],
         allowed_tool_names: set[str],
-    ) -> dict[str, object]:
+    ) -> tuple[dict[str, object], str | None]:
         choices = completion.get("choices")
         if not isinstance(choices, list) or len(choices) != 1:
             raise PlanExtractionError("A constrained response must contain exactly one choice.")
@@ -266,12 +419,12 @@ class Gateway:
                 raise PlanExtractionError(
                     "The completion called a tool not declared by the request."
                 )
-            return cls._parse_plan_object(function.get("arguments"))
+            return cls._parse_plan_object(function.get("arguments")), function_name
 
         content = message.get("content")
         if not isinstance(content, str):
             raise PlanExtractionError("The assistant response must contain a JSON plan.")
-        return cls._parse_plan_object(content)
+        return cls._parse_plan_object(content), None
 
     @staticmethod
     def _allowed_tool_names(tools: object) -> set[str]:

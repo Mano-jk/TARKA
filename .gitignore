@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .ty_cache/
+node_modules/
 .terraform/
 *.tfstate
 *.tfstate.*

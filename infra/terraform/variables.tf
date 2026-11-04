@@ -62,12 +62,39 @@ variable "upstream_api_key" {
 
 variable "proxy_api_key" {
   type        = string
+  default     = null
+  nullable    = true
   sensitive   = true
-  description = "Client bearer key stored in Secrets Manager and Terraform state."
+  description = "Single-tenant bearer key. Set this or tenant_api_keys_json."
 
   validation {
-    condition     = length(var.proxy_api_key) >= 32
-    error_message = "proxy_api_key must contain at least 32 characters."
+    condition     = var.proxy_api_key == null ? true : length(var.proxy_api_key) >= 32
+    error_message = "proxy_api_key must be null or contain at least 32 characters."
+  }
+}
+
+variable "tenant_api_keys_json" {
+  type        = string
+  default     = null
+  nullable    = true
+  sensitive   = true
+  description = "JSON object mapping tenant IDs to unique bearer keys; stored in Terraform state."
+
+  validation {
+    condition = var.tenant_api_keys_json == null ? true : try(
+      length(keys(jsondecode(var.tenant_api_keys_json))) > 0 &&
+      length(keys(jsondecode(var.tenant_api_keys_json))) <= 100 &&
+      alltrue([
+        for tenant_id, api_key in jsondecode(var.tenant_api_keys_json) :
+        length(tenant_id) > 0 &&
+        length(tenant_id) <= 128 &&
+        length(api_key) >= 32
+      ]) &&
+      length(distinct(values(jsondecode(var.tenant_api_keys_json)))) ==
+      length(keys(jsondecode(var.tenant_api_keys_json))),
+      false
+    )
+    error_message = "tenant_api_keys_json must map 1-100 tenant IDs to unique keys of at least 32 characters."
   }
 }
 

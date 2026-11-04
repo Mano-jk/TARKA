@@ -119,16 +119,25 @@ resource "aws_ecs_task_definition" "tarka" {
       { name = "TARKA_MAX_RETRIES", value = tostring(var.max_retries) },
       { name = "TARKA_FAIL_POLICY", value = var.fail_policy },
     ]
-    secrets = [
-      {
-        name      = "TARKA_UPSTREAM_API_KEY"
-        valueFrom = aws_secretsmanager_secret.upstream_api_key.arn
-      },
-      {
-        name      = "TARKA_PROXY_API_KEY"
-        valueFrom = aws_secretsmanager_secret.proxy_api_key.arn
-      }
-    ]
+    secrets = concat(
+      [
+        {
+          name      = "TARKA_UPSTREAM_API_KEY"
+          valueFrom = aws_secretsmanager_secret.upstream_api_key.arn
+        }
+      ],
+      var.tenant_api_keys_json == null ? [
+        {
+          name      = "TARKA_PROXY_API_KEY"
+          valueFrom = aws_secretsmanager_secret.proxy_api_key[0].arn
+        }
+        ] : [
+        {
+          name      = "TARKA_TENANT_API_KEYS"
+          valueFrom = aws_secretsmanager_secret.tenant_api_keys[0].arn
+        }
+      ]
+    )
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -145,6 +154,8 @@ resource "aws_ecs_task_definition" "tarka" {
       startPeriod = 30
     }
   }])
+
+  depends_on = [terraform_data.auth_config]
 }
 
 resource "aws_ecs_service" "tarka" {
