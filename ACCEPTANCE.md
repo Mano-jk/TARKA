@@ -12,16 +12,17 @@
 - [x] Undeclared and multi-tool calls fail closed.
 - [x] Exhausted retries fail closed by default; `fail_open` is configurable.
 - [x] Fixed bindings preserve JSON types, retry results do not leak across attempts, and oversized/malformed upstream responses fail closed.
-- [x] The proxy requires a configured bearer key, limits request size, exposes `/healthz`, strips `logic_constraints`, and returns structured errors.
+- [x] The proxy requires a configured bearer key, limits request size on both provider routes, exposes `/healthz`, strips `logic_constraints`, and returns structured errors.
 - [x] Constrained streaming requests return a clear 400 error.
-- [x] `uv sync --locked`, Ruff, ty, and pytest pass on Windows with Python 3.15.2.
-- [x] Local p95 (2026-11-04): 100-variable verifier 16.8 ms; proxy with mock upstream 3.6 ms (not a live-network measurement).
+- [x] `uv sync --locked`, Ruff, ty, and all 69 Python tests pass on Windows with Python 3.15.2.
+- [x] Latest local p95 (2026-11-04): 100-variable verifier 25.8 ms; proxy with mock upstream 3.4 ms (not a live-network measurement).
 - [x] Terraform formats and validates locally with the S3 backend disabled.
 
 ## Pending environment or release verification
 
-- [ ] Confirm CI on `ubuntu-24.04` after pushing the branch.
-- [ ] Build and run the Docker image; Docker is not installed on the current workstation.
+- [x] Confirm CI on `ubuntu-24.04` after pushing commit `fd492c7`; all workflow jobs passed.
+- [x] Build the Docker image in GitHub CI on `ubuntu-24.04`.
+- [ ] Run the Docker image locally or on the approved reference/deployed environment; Docker is not installed on the current workstation.
 - [ ] Measure solver and proxy p95 latency on the approved reference or deployed environment; the local mock benchmark is only an estimate.
 - [ ] Confirm AWS account, region, private DNS/certificate, approved client CIDRs, remote-state bucket, and TCP 443 egress policy with the cloud owner.
 - [ ] Apply and destroy the Terraform dev environment after those approvals.
@@ -38,10 +39,14 @@ complete just because the local Phase 1 checks pass.
 - [x] Anthropic Messages text/tool-use subset and authenticated OpenAI-compatible proxy.
 - [x] Typed TypeScript proxy client, build/test script, and CI job.
 - [x] Static dashboard and authenticated process-local aggregate metrics, partitioned by configured tenant key.
+- [x] Bounded JSON Schema construction rejects external/dynamic references and excessive schema complexity.
+- [x] Framework-neutral Python `@guard_tool` validates synchronous and asynchronous tool arguments before execution, with bounded JSON-compatible inputs.
+- [x] Both provider routes enforce authenticated per-tenant process-local rate limits and request-body limits.
+- [x] Terraform task egress is deny-by-default and permits only explicitly approved upstream IPv4 CIDRs on TCP 443.
 - [ ] Fine-tuned SLM autoformalizer, training/evaluation dataset, and model serving. This requires an approved model/runtime, dataset policy, and compute/provider choice.
 - [ ] General execution-DAG and LTL/state-machine verification with trusted server-side session state. Current workflow guard is deliberately limited and does not persist or authenticate execution history independently.
 - [ ] OPA/Rego ingestion, complete JSON Schema/OpenAPI coverage, and precompiled domain templates beyond the current narrow examples.
 - [ ] Full Anthropic compatibility, including streaming, image/multimodal content, and provider-specific options.
 - [ ] Durable, production dashboard analytics and detailed UNSAT diagnostics. Current telemetry is process-local aggregates and intentionally does not retain policy text or request content.
-- [ ] Isolated solver sandboxes and production tenant isolation review. Tenant keys isolate auth and metrics, but do not yet provide per-tenant process/resource sandboxes.
+- [ ] Isolated solver sandboxes and production tenant isolation review. Tenant keys isolate auth, metrics, and in-process rate-limit buckets, but do not yet provide per-tenant process/resource sandboxes or a distributed quota.
 - [ ] Production latency/SLO and enforcement-accuracy evidence, container execution, approved AWS apply/destroy, and deployed endpoint verification.

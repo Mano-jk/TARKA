@@ -68,7 +68,7 @@ run `npm ci`, `npm test`, and `npm pack --dry-run`. It uses the platform
 
 Run `uv run python examples/benchmark.py` to repeat the local p95 checks. On
 2026-11-04, Windows with CPython 3.15.2 and an AMD Ryzen 9 5900HS measured
-approximately 16.8 ms for 100 bound variables and 100 rules, and 3.6 ms for the
+approximately 25.8 ms for 100 bound variables and 100 rules, and 3.4 ms for the
 proxy with an in-process mock upstream (20 warmups, 250 measured requests). These
 are local development measurements, not live-network, LLM, or AWS latency.
 
