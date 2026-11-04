@@ -34,6 +34,32 @@ print(result.message)
 
 Run the local example with `uv run python examples/discount_order.py`.
 
+For framework-neutral agent integrations, decorate side-effecting Python tool
+functions with `@guard_tool(rules=[...], schema=..., bindings=...)`. It validates
+the bound arguments before invoking either a synchronous or asynchronous tool;
+rejected calls raise `ToolValidationError` and do not execute the function:
+
+```python
+from tarka import guard_tool
+
+@guard_tool(
+    rules=["amount <= daily_limit"],
+    bindings={"daily_limit": 100},
+    schema={
+        "type": "object",
+        "properties": {"amount": {"type": "number", "minimum": 0}},
+        "required": ["amount"],
+    },
+)
+async def issue_refund(amount: float) -> str:
+    return await payment_provider.refund(amount)
+```
+
+This guard applies at the tool execution boundary, unlike proxy checks which
+validate proposed model output before returning it to the agent. Integrations
+must use both layers when the agent runtime might bypass the proxy. Use
+`ToolValidationError` as a hard rejection; do not catch it and execute anyway.
+
 The typed TypeScript proxy client is in `sdk/typescript`. From that directory,
 run `npm ci`, `npm test`, and `npm pack --dry-run`. It uses the platform
 `fetch` implementation and sends `logic_constraints` only to TARKA.
@@ -87,6 +113,9 @@ schema-only request is sufficient to enable constrained verification:
 
 Schema violations are returned to the upstream model as correction feedback and
 are subject to the same retry and fail-closed policy as rule violations.
+For safety, JSON Schema `$ref` and `$dynamicRef` are disabled for caller-provided
+schemas to prevent remote resource retrieval; inline the schema or use the
+bounded OpenAPI 3.1 operation importer with local references.
 For OpenAPI 3.1.0/3.1.1 contracts, pass the document and an operation ID instead
 of `schema`. TARKA validates against that operation's JSON request-body schema.
 Only local JSON Pointer references are accepted; recursive and external schema
@@ -137,6 +166,10 @@ curl.exe http://127.0.0.1:8000/v1/chat/completions `
 require the configured bearer key, bodies are limited to 1 MiB, and streaming
 is not supported. Keep `TARKA_FAIL_POLICY=fail_closed` for deployments; the
 `fail_open` option can return unverified completions.
+Both provider routes enforce an authenticated-tenant token bucket, defaulting
+to 60 requests per minute; configure `TARKA_RATE_LIMIT_PER_MINUTE` between
+1 and 10000. It is process-local, so deployments with multiple replicas still
+need an edge/API-gateway rate limit to enforce a global tenant quota.
 The authenticated `GET /dashboard/metrics` endpoint returns process-local
 aggregate outcomes, bounded-window request latency, and upstream-reported token
 totals. It retains no prompts, plans, rules, or per-request diagnostics; all
@@ -144,12 +177,12 @@ metrics reset on process restart. Latency includes upstream time and is not the
 proxy-overhead SLA measurement.
 The static `GET /dashboard` page reads these metrics after the operator enters
 the proxy key; it does not persist the key in browser storage.
-For a single-process tenant-key deployment, configure
+For a tenant-key deployment, configure
 `TARKA_TENANT_API_KEYS` as a JSON object mapping tenant IDs to unique keys of
 at least 32 characters, and leave `TARKA_PROXY_API_KEY` unset. Each key sees
 only that tenant's in-memory dashboard aggregates. Store this JSON in a secret
-manager; do not put it in source control or command history. The current
-Terraform example still provisions one proxy key.
+manager; do not put it in source control or command history. The Terraform
+deployment supports either single-tenant or tenant-key authentication.
 
 The proxy also exposes a non-streaming Anthropic Messages-compatible route at
 `POST /v1/messages`. It accepts `x-api-key` and `anthropic-version`, translates

@@ -54,6 +54,17 @@ variable "upstream_base_url" {
   default = "https://api.openai.com/v1"
 }
 
+variable "allowed_upstream_cidrs" {
+  type        = list(string)
+  default     = []
+  description = "Approved IPv4 destinations allowed TCP 443 egress from tasks; empty blocks outbound application traffic."
+
+  validation {
+    condition     = alltrue([for cidr in var.allowed_upstream_cidrs : can(cidrnetmask(cidr))])
+    error_message = "Every allowed_upstream_cidrs entry must be a valid CIDR."
+  }
+}
+
 variable "upstream_api_key" {
   type        = string
   sensitive   = true
@@ -115,5 +126,15 @@ variable "fail_policy" {
   validation {
     condition     = contains(["fail_closed", "fail_open"], var.fail_policy)
     error_message = "fail_policy must be fail_closed or fail_open."
+  }
+}
+
+variable "rate_limit_per_minute" {
+  type    = number
+  default = 60
+
+  validation {
+    condition     = var.rate_limit_per_minute >= 1 && var.rate_limit_per_minute <= 10000 && floor(var.rate_limit_per_minute) == var.rate_limit_per_minute
+    error_message = "rate_limit_per_minute must be an integer from 1 to 10000."
   }
 }

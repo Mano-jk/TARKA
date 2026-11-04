@@ -65,7 +65,7 @@ def _measure_proxy() -> float:
         },
     }
 
-    app = create_app(gateway, proxy_api_key=api_key)
+    app = create_app(gateway, proxy_api_key=api_key, rate_limit_per_minute=1000)
 
     async def run() -> float:
         try:

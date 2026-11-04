@@ -264,6 +264,64 @@ def test_gateway_rejects_invalid_json_schema_before_upstream_call() -> None:
     assert upstream_calls == 0
 
 
+@pytest.mark.parametrize("reference_keyword", ["$ref", "$dynamicRef"])
+def test_gateway_rejects_external_json_schema_references_before_upstream_call(
+    reference_keyword: str,
+) -> None:
+    upstream_calls = 0
+
+    def respond(_: httpx.Request) -> httpx.Response:
+        nonlocal upstream_calls
+        upstream_calls += 1
+        return httpx.Response(200, json=_completion(20))
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            gateway = Gateway("https://llm.example/v1", client=client)
+            await gateway.chat_completions(
+                {
+                    "model": "test-model",
+                    "messages": [],
+                    "logic_constraints": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "value": {
+                                    reference_keyword: "https://attacker.example/schema.json"
+                                }
+                            },
+                        }
+                    },
+                }
+            )
+
+    with pytest.raises(ValueError, match="references are disabled"):
+        asyncio.run(run())
+    assert upstream_calls == 0
+
+
+def test_gateway_rejects_excessively_deep_schema_before_upstream_call() -> None:
+    schema: dict[str, object] = {"type": "string"}
+    for _ in range(70):
+        schema = {"properties": {"nested": schema}}
+
+    async def run() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=_completion(20)))
+        ) as client:
+            gateway = Gateway("https://llm.example/v1", client=client)
+            await gateway.chat_completions(
+                {
+                    "model": "test-model",
+                    "messages": [],
+                    "logic_constraints": {"schema": schema},
+                }
+            )
+
+    with pytest.raises(ValueError, match="nesting levels"):
+        asyncio.run(run())
+
+
 def test_gateway_extracts_and_validates_openapi_operation_schema() -> None:
     request_bodies: list[dict[str, object]] = []
     document: dict[str, object] = {

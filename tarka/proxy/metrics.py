@@ -2,10 +2,12 @@
 
 import math
 import threading
+import time
 from collections import Counter, deque
 from collections.abc import Mapping
 
 _LATENCY_WINDOW = 1024
+_TOKEN_BUCKET_TENANTS = 1000
 _OUTCOMES = frozenset(
     {
         "verified",
@@ -15,6 +17,7 @@ _OUTCOMES = frozenset(
         "timeout",
         "upstream_error",
         "other_error",
+        "rate_limited",
     }
 )
 
@@ -34,6 +37,8 @@ class GatewayMetrics:
         outcome: str,
         latency_ms: float,
         completion: Mapping[str, object] | None = None,
+        *,
+        include_latency: bool = True,
     ) -> None:
         """Record one aggregate result; prompt and completion bodies are discarded."""
         if outcome not in _OUTCOMES:
@@ -44,7 +49,8 @@ class GatewayMetrics:
         input_tokens, output_tokens = self._reported_tokens(completion)
         with self._lock:
             self._outcomes[outcome] += 1
-            self._latencies_ms.append(latency_ms)
+            if include_latency:
+                self._latencies_ms.append(latency_ms)
             self._input_tokens += input_tokens
             self._output_tokens += output_tokens
 
@@ -62,6 +68,7 @@ class GatewayMetrics:
                 "verification_timeouts": self._outcomes["timeout"],
                 "upstream_errors": self._outcomes["upstream_error"],
                 "other_errors": self._outcomes["other_error"],
+                "rate_limited_requests": self._outcomes["rate_limited"],
                 "mean_request_latency_ms": (
                     sum(latencies) / len(latencies) if latencies else 0.0
                 ),
@@ -90,3 +97,34 @@ class GatewayMetrics:
             return 0.0
         index = max(0, math.ceil(percentile * len(sorted_values)) - 1)
         return sorted_values[index]
+
+
+class TenantRateLimiter:
+    """Bounded process-local token bucket keyed by authenticated tenant."""
+
+    def __init__(self, requests_per_minute: int) -> None:
+        if type(requests_per_minute) is not int or not 1 <= requests_per_minute <= 10_000:
+            raise ValueError("requests_per_minute must be an integer from 1 to 10000.")
+        self._capacity = float(requests_per_minute)
+        self._refill_per_second = self._capacity / 60
+        self._buckets: dict[str, tuple[float, float]] = {}
+        self._lock = threading.Lock()
+
+    def acquire(self, tenant_id: str) -> float | None:
+        """Consume a token or return retry delay seconds."""
+        now = time.monotonic()
+        with self._lock:
+            bucket = self._buckets.get(tenant_id)
+            tokens, previous = (
+                (self._capacity, now)
+                if bucket is None
+                else bucket
+            )
+            tokens = min(self._capacity, tokens + (now - previous) * self._refill_per_second)
+            if tokens >= 1:
+                self._buckets[tenant_id] = (tokens - 1, now)
+                return None
+            if bucket is None and len(self._buckets) >= _TOKEN_BUCKET_TENANTS:
+                return 60 / self._refill_per_second
+            self._buckets[tenant_id] = (tokens, now)
+            return (1 - tokens) / self._refill_per_second

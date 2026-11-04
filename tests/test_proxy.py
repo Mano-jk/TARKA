@@ -253,6 +253,101 @@ def test_tenant_keys_require_unique_strong_credentials() -> None:
         create_app(gateway, tenant_api_keys={"tenant-a": "too-short"})
 
 
+def test_authenticated_tenant_rate_limit_applies_to_both_provider_routes() -> None:
+    upstream_calls = 0
+
+    def respond(_: httpx.Request) -> httpx.Response:
+        nonlocal upstream_calls
+        upstream_calls += 1
+        return httpx.Response(200, json=_completion(20))
+
+    upstream = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    gateway = Gateway("https://llm.example/v1", client=upstream)
+
+    async def run() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
+        try:
+            app = create_app(gateway, proxy_api_key=PROXY_KEY, rate_limit_per_minute=1)
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="http://testserver",
+                ) as client:
+                    first = await client.post(
+                        "/v1/chat/completions",
+                        json=_request(),
+                        headers=AUTH_HEADERS,
+                    )
+                    limited_anthropic = await client.post(
+                        "/v1/messages",
+                        json={
+                            "model": "test-model",
+                            "max_tokens": 64,
+                            "messages": [{"role": "user", "content": "Hello."}],
+                        },
+                        headers={
+                            "x-api-key": PROXY_KEY,
+                            "anthropic-version": "2023-06-01",
+                        },
+                    )
+                    metrics = await client.get("/dashboard/metrics", headers=AUTH_HEADERS)
+                    return first, limited_anthropic, metrics
+        finally:
+            await upstream.aclose()
+
+    first, limited, metrics = asyncio.run(run())
+
+    assert first.status_code == 200
+    assert limited.status_code == 429
+    assert limited.headers["retry-after"]
+    assert upstream_calls == 1
+    assert metrics.json()["rate_limited_requests"] == 1
+    assert metrics.json()["latency_sample_count"] == 1
+
+
+def test_authenticated_tenants_have_independent_rate_limits() -> None:
+    upstream = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=_completion(20)))
+    )
+    gateway = Gateway("https://llm.example/v1", client=upstream)
+
+    async def run() -> tuple[httpx.Response, httpx.Response]:
+        try:
+            app = create_app(
+                gateway,
+                tenant_api_keys={"tenant-a": PROXY_KEY, "tenant-b": TENANT_B_KEY},
+                rate_limit_per_minute=1,
+            )
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="http://testserver",
+                ) as client:
+                    first = await client.post(
+                        "/v1/chat/completions",
+                        json=_request(),
+                        headers=AUTH_HEADERS,
+                    )
+                    second = await client.post(
+                        "/v1/chat/completions",
+                        json=_request(),
+                        headers={"Authorization": f"Bearer {TENANT_B_KEY}"},
+                    )
+                    return first, second
+        finally:
+            await upstream.aclose()
+
+    first, second = asyncio.run(run())
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+
+def test_invalid_rate_limit_configuration_is_rejected() -> None:
+    gateway = Gateway("https://llm.example/v1")
+
+    with pytest.raises(ValueError, match="requests_per_minute"):
+        create_app(gateway, proxy_api_key=PROXY_KEY, rate_limit_per_minute=0)
+
+
 def test_dashboard_page_is_static_and_does_not_cache_metrics_or_key() -> None:
     gateway = Gateway("https://llm.example/v1")
 
@@ -402,6 +497,27 @@ def test_proxy_rejects_oversized_request_body() -> None:
                 "/v1/chat/completions",
                 content=b"x" * (MAX_REQUEST_BYTES + 1),
                 headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+            )
+
+    response = asyncio.run(run())
+
+    assert response.status_code == 413
+    assert response.json()["error"]["type"] == "request_too_large"
+
+
+def test_proxy_rejects_oversized_anthropic_request_body() -> None:
+    gateway = Gateway("https://llm.example/v1")
+
+    async def run() -> httpx.Response:
+        async with _proxy_client(gateway) as client:
+            return await client.post(
+                "/v1/messages",
+                content=b"x" * (MAX_REQUEST_BYTES + 1),
+                headers={
+                    "x-api-key": PROXY_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
             )
 
     response = asyncio.run(run())

@@ -38,11 +38,15 @@ resource "aws_security_group" "task" {
     security_groups = [aws_security_group.load_balancer.id]
   }
 
-  egress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+  dynamic "egress" {
+    for_each = var.allowed_upstream_cidrs
+
+    content {
+      from_port   = 443
+      to_port     = 443
+      protocol    = "tcp"
+      cidr_blocks = [egress.value]
+    }
   }
 }
 
@@ -118,6 +122,7 @@ resource "aws_ecs_task_definition" "tarka" {
       { name = "TARKA_UPSTREAM_BASE_URL", value = var.upstream_base_url },
       { name = "TARKA_MAX_RETRIES", value = tostring(var.max_retries) },
       { name = "TARKA_FAIL_POLICY", value = var.fail_policy },
+      { name = "TARKA_RATE_LIMIT_PER_MINUTE", value = tostring(var.rate_limit_per_minute) },
     ]
     secrets = concat(
       [

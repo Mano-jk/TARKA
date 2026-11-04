@@ -5,6 +5,7 @@ import secrets
 from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
 from json import JSONDecodeError, loads
+from math import ceil
 from threading import Lock
 from time import perf_counter
 from typing import Annotated
@@ -28,7 +29,7 @@ from tarka.proxy.anthropic import (
 )
 from tarka.proxy.dashboard import DASHBOARD_HTML
 from tarka.proxy.limits import MAX_REQUEST_BYTES, RequestBodyLimitMiddleware
-from tarka.proxy.metrics import GatewayMetrics
+from tarka.proxy.metrics import GatewayMetrics, TenantRateLimiter
 
 
 class LogicConstraints(BaseModel):
@@ -105,6 +106,7 @@ def create_app(
     *,
     proxy_api_key: str | None = None,
     tenant_api_keys: Mapping[str, str] | None = None,
+    rate_limit_per_minute: int | None = None,
 ) -> FastAPI:
     """Create the proxy app, optionally using an injected Gateway for tests."""
     active_gateway = gateway or _configured_gateway()
@@ -138,6 +140,12 @@ def create_app(
             raise ValueError("Tenant API keys must be unique.")
     if configured_proxy_key and len(configured_proxy_key) < 32:
         raise ValueError("TARKA_PROXY_API_KEY must contain at least 32 characters.")
+    if rate_limit_per_minute is None:
+        raw_rate_limit = os.getenv("TARKA_RATE_LIMIT_PER_MINUTE", "60")
+        try:
+            rate_limit_per_minute = int(raw_rate_limit)
+        except ValueError as exc:
+            raise ValueError("TARKA_RATE_LIMIT_PER_MINUTE must be an integer.") from exc
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
@@ -150,6 +158,7 @@ def create_app(
     app.state.gateway = active_gateway
     tenant_metrics: dict[str, GatewayMetrics] = {}
     metrics_lock = Lock()
+    rate_limiter = TenantRateLimiter(rate_limit_per_minute)
 
     def metrics_for(tenant_id: str) -> GatewayMetrics:
         with metrics_lock:
@@ -248,6 +257,19 @@ def create_app(
                     }
                 },
             )
+        retry_after = rate_limiter.acquire(tenant_id)
+        if retry_after is not None:
+            metrics_for(tenant_id).record("rate_limited", 0, include_latency=False)
+            return JSONResponse(
+                status_code=429,
+                headers={"Retry-After": str(max(1, ceil(retry_after)))},
+                content={
+                    "error": {
+                        "type": "rate_limit_exceeded",
+                        "message": "Request rate limit exceeded.",
+                    }
+                },
+            )
         try:
             request_started = perf_counter()
             metrics = metrics_for(tenant_id)
@@ -341,6 +363,20 @@ def create_app(
                 content={
                     "type": "error",
                     "error": {"type": "authentication_error", "message": "Invalid API key."},
+                },
+            )
+        retry_after = rate_limiter.acquire(tenant_id)
+        if retry_after is not None:
+            metrics_for(tenant_id).record("rate_limited", 0, include_latency=False)
+            return JSONResponse(
+                status_code=429,
+                headers={"Retry-After": str(max(1, ceil(retry_after)))},
+                content={
+                    "type": "error",
+                    "error": {
+                        "type": "rate_limit_exceeded",
+                        "message": "Request rate limit exceeded.",
+                    },
                 },
             )
         if not anthropic_version:

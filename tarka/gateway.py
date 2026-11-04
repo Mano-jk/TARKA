@@ -6,12 +6,11 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 import httpx
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError
 from jsonschema.protocols import Validator
 
 from tarka.contracts import ContractError, operation_request_schema
 from tarka.rules import parse_rule
+from tarka.schemas import build_schema_validator
 from tarka.templates import TemplateError, get_template_rules
 from tarka.temporal import WorkflowRuleError, verify_workflow
 from tarka.verifier import RuleEvaluationError, VerificationResult, VerificationStatus, verify
@@ -197,15 +196,10 @@ class Gateway:
 
         schema_validator: Validator | None = None
         if schema is not None:
-            if not isinstance(schema, Mapping) and type(schema) is not bool:
-                raise ValueError(
-                    "logic_constraints.schema must be a JSON Schema object or boolean."
-                )
             try:
-                Draft202012Validator.check_schema(schema)
-            except SchemaError as exc:
-                raise ValueError(f"logic_constraints.schema is invalid: {exc.message}") from exc
-            schema_validator = Draft202012Validator(schema)
+                schema_validator = build_schema_validator(schema)
+            except ValueError as exc:
+                raise ValueError(f"logic_constraints.schema is invalid: {exc}") from exc
         if not rule_list and schema_validator is None and not workflow_rules:
             raise ValueError(
                 "logic_constraints must include rules, a schema, OpenAPI, or workflow rules."

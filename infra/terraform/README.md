@@ -9,11 +9,11 @@ This root creates a private VPC, an internal HTTPS ALB, private ECS Fargate task
 - Approved client CIDRs. The example defaults to an empty list, which leaves the private ALB inaccessible until the owner supplies allowed ranges.
 - A source-commit image tag pushed to the created ECR repository before the full service apply.
 
-The ALB is internal and has no port-80 listener. TLS terminates at the ALB; ALB-to-task traffic is HTTP inside private subnets. The task security group permits outbound TCP 443 to any IPv4 destination through NAT to support configurable upstreams and AWS services; this is not a destination allow-list. The cloud owner must approve this egress or require a controlled egress proxy/firewall before production. The dev service uses one Fargate task and one NAT Gateway, so it is not highly available. NAT and ALB resources incur ongoing charges.
+The ALB is internal and has no port-80 listener. TLS terminates at the ALB; ALB-to-task traffic is HTTP inside private subnets. Task egress is blocked by default. The cloud owner must supply the approved IPv4 destination CIDRs for the upstream in `allowed_upstream_cidrs`; only TCP 443 to those CIDRs is enabled. Provider address ranges can change, so the owner must maintain the allow-list or use an approved egress proxy/firewall. Empty CIDRs intentionally prevent upstream requests. The dev service uses one Fargate task and one NAT Gateway, so it is not highly available. NAT and ALB resources incur ongoing charges.
 
 ## State and secrets
 
-Copy the templates, then fill in the backend bucket, private DNS/certificate, and approved client CIDRs:
+Copy the templates, then fill in the backend bucket, private DNS/certificate, approved client CIDRs, and approved upstream CIDRs:
 
 ```powershell
 Copy-Item backend.hcl.example backend.hcl
@@ -28,6 +28,8 @@ Choose exactly one client authentication mode:
 
 - Single tenant: provide `TF_VAR_proxy_api_key` as a key with at least 32 characters.
 - Multiple tenants: provide `TF_VAR_tenant_api_keys_json` as a JSON object mapping unique tenant IDs to keys with at least 32 characters. The container receives this value as `TARKA_TENANT_API_KEYS`; do not also set the single-tenant key.
+
+The service enforces a process-local per-tenant token bucket, configured by `rate_limit_per_minute` (default 60). It is not a distributed quota; retain an approved edge/API-gateway limit when adding replicas.
 
 For example, set the multi-tenant variable from a secure prompt rather than putting the value in command history:
 

@@ -15,7 +15,7 @@ class RequestBodyLimitMiddleware:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if (
             scope["type"] != "http"
-            or scope["path"] != "/v1/chat/completions"
+            or scope["path"] not in {"/v1/chat/completions", "/v1/messages"}
             or scope["method"] != "POST"
         ):
             await self.app(scope, receive, send)
@@ -37,10 +37,11 @@ class RequestBodyLimitMiddleware:
             message = await receive()
             if message["type"] == "http.disconnect":
                 return
-            body.extend(message.get("body", b""))
-            if len(body) > self.max_bytes:
+            chunk = message.get("body", b"")
+            if len(body) + len(chunk) > self.max_bytes:
                 await self._reject(send, 413, "request_too_large", "Request body exceeds 1 MiB.")
                 return
+            body.extend(chunk)
             if not message.get("more_body", False):
                 break
 
