@@ -3,6 +3,10 @@
 Deterministic logic gateway for agents. TARKA checks structured plans against
 declared rules before they are returned to a caller.
 
+See the [enterprise architecture and go-to-market plan](ENTERPRISE_ARCHITECTURE.md)
+for the target system design, security boundaries, launch strategy, rollout
+phases, and production gates.
+
 ## Development setup
 
 TARKA requires Python 3.15 or newer and uses uv for environment and dependency

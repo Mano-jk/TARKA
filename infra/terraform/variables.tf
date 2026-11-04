@@ -120,12 +120,13 @@ variable "max_retries" {
 }
 
 variable "fail_policy" {
-  type    = string
-  default = "fail_closed"
+  type        = string
+  default     = "fail_closed"
+  description = "AWS deployments must fail closed; fail-open behavior is only for local experimentation."
 
   validation {
-    condition     = contains(["fail_closed", "fail_open"], var.fail_policy)
-    error_message = "fail_policy must be fail_closed or fail_open."
+    condition     = var.fail_policy == "fail_closed"
+    error_message = "AWS deployments must use fail_closed; fail_open is not permitted."
   }
 }
 

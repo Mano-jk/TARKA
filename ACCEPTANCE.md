@@ -32,6 +32,8 @@
 
 The items below are separate from Phase 1 acceptance and are not represented as
 complete just because the local Phase 1 checks pass.
+The [enterprise architecture plan](ENTERPRISE_ARCHITECTURE.md) describes the
+proposed target and delivery gates; it does not mark those items delivered.
 
 - [x] JSON Schema plan validation and OpenAPI 3.1 JSON request-body schema ingestion.
 - [x] Built-in finance discount, supply allocation, and consent-only rule templates.
@@ -43,6 +45,7 @@ complete just because the local Phase 1 checks pass.
 - [x] Framework-neutral Python `@guard_tool` validates synchronous and asynchronous tool arguments before execution, with bounded JSON-compatible inputs.
 - [x] Both provider routes enforce authenticated per-tenant process-local rate limits and request-body limits.
 - [x] Terraform task egress is deny-by-default and permits only explicitly approved upstream IPv4 CIDRs on TCP 443.
+- [x] Terraform rejects fail-open deployment configuration; the mocked AWS Terraform regression test passes.
 - [ ] Fine-tuned SLM autoformalizer, training/evaluation dataset, and model serving. This requires an approved model/runtime, dataset policy, and compute/provider choice.
 - [ ] General execution-DAG and LTL/state-machine verification with trusted server-side session state. Current workflow guard is deliberately limited and does not persist or authenticate execution history independently.
 - [ ] OPA/Rego ingestion, complete JSON Schema/OpenAPI coverage, and precompiled domain templates beyond the current narrow examples.

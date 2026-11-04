@@ -30,6 +30,7 @@ Choose exactly one client authentication mode:
 - Multiple tenants: provide `TF_VAR_tenant_api_keys_json` as a JSON object mapping unique tenant IDs to keys with at least 32 characters. The container receives this value as `TARKA_TENANT_API_KEYS`; do not also set the single-tenant key.
 
 The service enforces a process-local per-tenant token bucket, configured by `rate_limit_per_minute` (default 60). It is not a distributed quota; retain an approved edge/API-gateway limit when adding replicas.
+AWS deployments require `fail_policy = "fail_closed"`; Terraform rejects fail-open configuration because it can return an unverified completion after a verification failure. Use fail-open only for isolated local experiments, never for a protected side effect.
 
 For example, set the multi-tenant variable from a secure prompt rather than putting the value in command history:
 
